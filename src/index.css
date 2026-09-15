@@ -238,3 +238,17 @@
   }
 }
 
+/* Hide Lovable / GPT Engineer floating badge overlay */
+#gpt-engineer-badge,
+[id*="gpt-engineer"],
+[id*="lovable-badge"],
+[class*="lovable-badge"],
+a[href*="lovable.dev"],
+#lovable-badge-container {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+
