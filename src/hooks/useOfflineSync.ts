@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { flushQueue, getQueueSize, subscribe } from "@/lib/offlineCache";
+import { getOfflinePackCount } from "@/lib/studyPackCache";
+import { getCurrentUser } from "@/lib/authUser";
 
 /**
  * Tracks online/offline state, the size of the pending sync queue, and
  * automatically flushes queued operations whenever the device comes back
  * online (or when the tab becomes visible again).
+ * Also exposes the number of study packs available offline.
  */
 export const useOfflineSync = () => {
   const [online, setOnline] = useState(() =>
@@ -13,6 +16,30 @@ export const useOfflineSync = () => {
   );
   const [pending, setPending] = useState(() => getQueueSize());
   const [syncing, setSyncing] = useState(false);
+  const [offlinePackCount, setOfflinePackCount] = useState(0);
+
+  // Load offline pack count once on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { user } } = await getCurrentUser();
+        if (user) {
+          const count = await getOfflinePackCount(user.id);
+          setOfflinePackCount(count);
+        }
+      } catch { /* noop */ }
+    })();
+  }, []);
+
+  const refreshOfflineCount = useCallback(async () => {
+    try {
+      const { data: { user } } = await getCurrentUser();
+      if (user) {
+        const count = await getOfflinePackCount(user.id);
+        setOfflinePackCount(count);
+      }
+    } catch { /* noop */ }
+  }, []);
 
   useEffect(() => {
     const updatePending = () => setPending(getQueueSize());
@@ -51,5 +78,5 @@ export const useOfflineSync = () => {
     };
   }, []);
 
-  return { online, pending, syncing };
+  return { online, pending, syncing, offlinePackCount, refreshOfflineCount };
 };

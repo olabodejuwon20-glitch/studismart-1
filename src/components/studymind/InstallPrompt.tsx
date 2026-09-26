@@ -87,11 +87,11 @@ export const InstallPrompt = () => {
           {showIOS ? (
             <p className="text-xs text-muted-foreground mt-1">
               Tap <span className="font-semibold">Share</span> then{" "}
-              <span className="font-semibold">Add to Home Screen</span>.
+              <span className="font-semibold">Add to Home Screen</span> to study offline.
             </p>
           ) : (
             <p className="text-xs text-muted-foreground mt-1">
-              Add to your home screen for a faster, app-like experience.
+              Install for a faster experience — <span className="font-semibold text-primary">works offline</span> too!
             </p>
           )}
           {!showIOS && (

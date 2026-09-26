@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Bookmark, Loader2, Presentation, Sparkles } from "lucide-react";
+import { ArrowLeft, Bookmark, Loader2, Presentation, Sparkles, WifiOff } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { StatusBar } from "./StatusBar";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { getCurrentUser } from "@/lib/authUser";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cacheGet, cacheSet } from "@/lib/offlineCache";
+import { savePackOffline, saveQuestionsOffline, getPackOffline, getQuestionsOffline } from "@/lib/studyPackCache";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { haptic } from "@/lib/haptics";
@@ -38,20 +39,45 @@ export const StudyPack = ({ studyPackId, onBack, onPractice }: Props) => {
   const [questionCount, setQuestionCount] = useState(initial?.questionCount ?? 0);
   const [loading, setLoading] = useState(!initial);
 
+  const [isOfflineFallback, setIsOfflineFallback] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       const { data: { user } } = await getCurrentUser();
-      const cached = cacheGet<CachedPack>(user?.id ?? null, cacheName);
+      const uid = user?.id ?? null;
+      const cacheName = `studypack:${studyPackId ?? "latest"}`;
+
+      // 1. Try localStorage cache first (instant render)
+      const cached = cacheGet<CachedPack>(uid, cacheName);
       if (cached && !cancelled) {
         setPack(cached.pack);
         setMaterial(cached.material);
         setQuestionCount(cached.questionCount);
         setLoading(false);
-      } else if (!cached) {
-        setLoading(true);
       }
 
+      // 2. If offline, try IndexedDB for richer offline data
+      if (!navigator.onLine) {
+        if (studyPackId && uid) {
+          const idbPack = await getPackOffline(uid, studyPackId);
+          if (idbPack && !cancelled) {
+            setPack(idbPack);
+            setQuestionCount(idbPack.questionCount);
+            setIsOfflineFallback(true);
+            setLoading(false);
+          } else if (!cached && !cancelled) {
+            setLoading(false);
+          }
+        } else if (!cached && !cancelled) {
+          setLoading(false);
+        }
+        return;
+      }
+
+      if (!cached) setLoading(true);
+
+      // 3. Fetch fresh data from Supabase
       let pid = studyPackId;
       let nextPack: any | null = null;
       let nextMaterial: any | null = null;
@@ -72,6 +98,7 @@ export const StudyPack = ({ studyPackId, onBack, onPractice }: Props) => {
       }
       if (cancelled) return;
       setPack(nextPack);
+      setIsOfflineFallback(false);
 
       if (pid) {
         const { data: pkg } = await supabase.from("study_packs").select("material_id").eq("id", pid).maybeSingle();
@@ -87,7 +114,7 @@ export const StudyPack = ({ studyPackId, onBack, onPractice }: Props) => {
         nextCount = count ?? 0;
         if (!cancelled) setQuestionCount(nextCount);
 
-        // Cache the questions themselves so Practice works offline.
+        // Fetch and cache questions in both localStorage AND IndexedDB.
         const { data: qs } = await supabase
           .from("questions")
           .select("*")
@@ -95,15 +122,31 @@ export const StudyPack = ({ studyPackId, onBack, onPractice }: Props) => {
           .order("created_at", { ascending: true })
           .limit(50);
         if (qs && !cancelled) {
-          cacheSet(user?.id ?? null, `questions:${pid}`, qs);
+          cacheSet(uid, `questions:${pid}`, qs);
+          // Save to IndexedDB for richer offline support
+          if (uid) await saveQuestionsOffline(uid, pid, qs as any);
         }
       }
+
       if (!cancelled) {
-        cacheSet(user?.id ?? null, cacheName, {
+        // Save to localStorage cache
+        cacheSet(uid, cacheName, {
           pack: nextPack,
           material: nextMaterial,
           questionCount: nextCount,
         });
+        // Save to IndexedDB for offline access
+        if (uid && nextPack && pid) {
+          await savePackOffline(uid, {
+            id: pid,
+            title: nextPack.title ?? "Untitled",
+            summary: nextPack.summary ?? null,
+            topics: Array.isArray(nextPack.topics) ? nextPack.topics : [],
+            material_id: nextMaterial?.id ?? null,
+            created_at: nextPack.created_at ?? new Date().toISOString(),
+            questionCount: nextCount,
+          });
+        }
         setLoading(false);
       }
     };
