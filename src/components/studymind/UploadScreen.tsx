@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { ArrowLeft, Info, UploadCloud, Sparkles, FileText, ListChecks, BookOpen, Layers } from "lucide-react";
+import { ArrowLeft, Info, UploadCloud, Sparkles, FileText, ListChecks, BookOpen, Layers, HardDrive } from "lucide-react";
 import { StatusBar } from "./StatusBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,7 @@ import { toast } from "@/hooks/use-toast";
 import { extractTextFromFile } from "@/lib/extractText";
 import { analyzeDocument, type DocumentAnalysis } from "@/lib/documentChunker";
 import { generateStudyPackClient } from "@/lib/clientAiGenerator";
+import { GoogleDriveModal } from "./GoogleDriveModal";
 import { createNotification, checkAchievements } from "@/lib/notifications";
 import aiRobot from "@/assets/ai-robot.png";
 
@@ -36,6 +37,7 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
   const [stageIdx, setStageIdx] = useState(0);
   const [extractionProgress, setExtractionProgress] = useState<string>("");
   const [analyzedStats, setAnalyzedStats] = useState<DocumentAnalysis | null>(null);
+  const [driveModalOpen, setDriveModalOpen] = useState(false);
 
   const advance = () => {
     let i = 0;
@@ -314,6 +316,18 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
           </div>
         </label>
 
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setDriveModalOpen(true)}
+          className="w-full h-11 rounded-2xl border-border bg-card hover:bg-secondary/60 flex items-center justify-center gap-2 text-xs font-semibold tap-scale transition-colors shadow-sm"
+        >
+          <div className="h-5 w-5 rounded-md bg-[#4285F4]/15 flex items-center justify-center text-[#4285F4]">
+            <HardDrive className="h-3.5 w-3.5" />
+          </div>
+          <span>Import from Google Drive (Link or Picker)</span>
+        </Button>
+
         {file && (
           <div className="rounded-xl border border-primary/20 bg-primary-soft/40 px-3.5 py-2.5 flex items-center gap-2 text-xs text-primary animate-fade-in">
             <BookOpen className="h-4 w-4 shrink-0" />
@@ -362,6 +376,17 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
         )}
 
       </div>
+
+      <GoogleDriveModal
+        open={driveModalOpen}
+        onOpenChange={setDriveModalOpen}
+        onFileImported={(importedFile) => {
+          setFile(importedFile);
+          if (!title.trim()) {
+            setTitle(importedFile.name.replace(/\.[^.]+$/, ""));
+          }
+        }}
+      />
     </div>
   );
 };

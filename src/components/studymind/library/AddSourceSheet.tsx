@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { UploadCloud, Mic, FileText, Loader2, Square } from "lucide-react";
+import { UploadCloud, Mic, FileText, Loader2, Square, HardDrive } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { getCurrentUser } from "@/lib/authUser";
 import { extractTextFromFile } from "@/lib/extractText";
+import { GoogleDriveModal } from "@/components/studymind/GoogleDriveModal";
 import { toast } from "sonner";
 
 interface Props {
@@ -52,6 +53,7 @@ const FileTab = ({ notebookId, onDone }: { notebookId: string; onDone: () => voi
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
+  const [driveOpen, setDriveOpen] = useState(false);
 
   const submit = async () => {
     if (!file) return;
@@ -116,9 +118,31 @@ const FileTab = ({ notebookId, onDone }: { notebookId: string; onDone: () => voi
           <p className="text-[11px] text-muted-foreground mt-1">PDF, DOCX, TXT or image</p>
         </div>
       </label>
+
+      <Button
+        type="button"
+        variant="outline"
+        onClick={() => setDriveOpen(true)}
+        className="w-full h-11 rounded-xl border-border bg-card hover:bg-secondary/60 flex items-center justify-center gap-2 text-xs font-semibold tap-scale shadow-sm"
+      >
+        <div className="h-5 w-5 rounded-md bg-[#4285F4]/15 flex items-center justify-center text-[#4285F4]">
+          <HardDrive className="h-3.5 w-3.5" />
+        </div>
+        <span>Import from Google Drive</span>
+      </Button>
+
       <Button disabled={!file || busy} onClick={submit} className="w-full h-11 rounded-xl gradient-primary text-white">
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add to notebook"}
       </Button>
+
+      <GoogleDriveModal
+        open={driveOpen}
+        onOpenChange={setDriveOpen}
+        onFileImported={(importedFile) => {
+          setFile(importedFile);
+          if (!title.trim()) setTitle(importedFile.name.replace(/\.[^.]+$/, ""));
+        }}
+      />
     </div>
   );
 };
