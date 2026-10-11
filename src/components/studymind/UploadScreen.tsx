@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ArrowLeft, Info, UploadCloud, Sparkles, FileText, ListChecks } from "lucide-react";
+import { useState, useMemo } from "react";
+import { ArrowLeft, Info, UploadCloud, Sparkles, FileText, ListChecks, BookOpen, Layers } from "lucide-react";
 import { StatusBar } from "./StatusBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { getCurrentUser } from "@/lib/authUser";
 import { toast } from "@/hooks/use-toast";
 import { extractTextFromFile } from "@/lib/extractText";
+import { analyzeDocument, type DocumentAnalysis } from "@/lib/documentChunker";
+import { generateStudyPackClient } from "@/lib/clientAiGenerator";
 import { createNotification, checkAchievements } from "@/lib/notifications";
 import aiRobot from "@/assets/ai-robot.png";
 
@@ -18,12 +20,11 @@ interface Props {
   onGenerateTest?: (materialId: string, title: string) => void;
 }
 
-
 const STAGES = [
-  { key: "extract", label: "Reading material" },
-  { key: "identify", label: "Identifying topics" },
-  { key: "summary", label: "Generating summary" },
-  { key: "questions", label: "Creating questions" },
+  { key: "extract", label: "Reading material (high-speed)" },
+  { key: "identify", label: "Mapping sections & topics across entire syllabus" },
+  { key: "summary", label: "Synthesizing master summary & key points" },
+  { key: "questions", label: "Generating balanced exam questions" },
 ] as const;
 
 export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
@@ -33,6 +34,8 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
   const [processing, setProcessing] = useState(false);
   const [savingForTest, setSavingForTest] = useState(false);
   const [stageIdx, setStageIdx] = useState(0);
+  const [extractionProgress, setExtractionProgress] = useState<string>("");
+  const [analyzedStats, setAnalyzedStats] = useState<DocumentAnalysis | null>(null);
 
   const advance = () => {
     let i = 0;
@@ -114,6 +117,7 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
 
     setProcessing(true);
     setStageIdx(0);
+    setExtractionProgress("");
     const stop = advance();
 
     try {
@@ -126,9 +130,11 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
         const { error: upErr } = await supabase.storage.from("materials").upload(storagePath, file);
         if (upErr) throw upErr;
 
-        // Extract text in-browser for PDF / DOCX / text files
+        // Extract text in-browser for PDF / DOCX / text files with live progress
         try {
-          const extracted = await extractTextFromFile(file);
+          const extracted = await extractTextFromFile(file, (curr, total, stageMsg) => {
+            setExtractionProgress(stageMsg || `Reading page ${curr} of ${total}`);
+          });
           if (extracted && extracted.length > (rawText?.length ?? 0)) {
             rawText = extracted;
           }
@@ -155,12 +161,57 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
         .single();
       if (matErr || !material) throw matErr ?? new Error("Could not save material");
 
-      const { data, error } = await supabase.functions.invoke("generate-study-pack", {
-        body: { material_id: material.id },
-      });
-      if (error) throw error;
-      const packId = (data as any)?.study_pack_id;
-      if (!packId) throw new Error("No study pack returned");
+      let packId: string | null = null;
+
+      // 1. Attempt edge function generation
+      try {
+        const { data, error } = await supabase.functions.invoke("generate-study-pack", {
+          body: { material_id: material.id },
+        });
+        if (error) throw error;
+        packId = (data as any)?.study_pack_id;
+      } catch (edgeErr: any) {
+        console.warn("Edge function invocation failed, checking client fallback:", edgeErr);
+        // 2. Client-side Gemini fallback if API key configured
+        const geminiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
+        if (geminiKey && rawText) {
+          setExtractionProgress("Synthesizing study pack via Gemini engine...");
+          const clientData = await generateStudyPackClient(rawText, finalTitle, { apiKey: geminiKey });
+          
+          const { data: pack, error: pErr } = await supabase
+            .from("study_packs")
+            .insert({
+              material_id: material.id,
+              user_id: user.id,
+              summary: clientData.summary + (clientData.keyPoints.length ? "\n\n• " + clientData.keyPoints.join("\n• ") : ""),
+              topics: clientData.topics,
+            })
+            .select()
+            .single();
+
+          if (pErr || !pack) throw edgeErr;
+
+          if (clientData.questions.length) {
+            const rows = clientData.questions.map((q) => ({
+              study_pack_id: pack.id,
+              user_id: user.id,
+              topic: q.topic,
+              question: q.question,
+              options: q.options,
+              correct_index: q.correct_index,
+              explanation: q.explanation,
+              difficulty: q.difficulty,
+            }));
+            await supabase.from("questions").insert(rows);
+          }
+          await supabase.from("materials").update({ status: "ready" }).eq("id", material.id);
+          packId = pack.id;
+        } else {
+          throw edgeErr;
+        }
+      }
+
+      if (!packId) throw new Error("No study pack generated. Please try again.");
 
       stop();
       setStageIdx(STAGES.length - 1);
@@ -215,7 +266,11 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
 
           <div className="w-full mt-8">
             <Progress value={((stageIdx + 1) / STAGES.length) * 100} className="h-2" />
-            <p className="text-xs text-muted-foreground mt-3">This may take 10–30 seconds</p>
+            {extractionProgress ? (
+              <p className="text-xs text-primary font-semibold mt-3 animate-pulse">{extractionProgress}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground mt-3">Analyzing whole document · High-yield extraction</p>
+            )}
           </div>
         </div>
       </div>
@@ -255,9 +310,16 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
               {file ? <FileText className="h-7 w-7 text-primary" /> : <UploadCloud className="h-7 w-7 text-primary" />}
             </div>
             <p className="text-sm font-medium">{file ? file.name : "Tap to choose a file"}</p>
-            <p className="text-[11px] text-muted-foreground mt-2">PDF, DOCX, TXT — text is extracted automatically</p>
+            <p className="text-[11px] text-muted-foreground mt-2">PDF, DOCX, TXT — Supports up to 500 pages with full chapter review</p>
           </div>
         </label>
+
+        {file && (
+          <div className="rounded-xl border border-primary/20 bg-primary-soft/40 px-3.5 py-2.5 flex items-center gap-2 text-xs text-primary animate-fade-in">
+            <BookOpen className="h-4 w-4 shrink-0" />
+            <span className="font-medium">Deep AI Review enabled: Full syllabus questions across all chapters</span>
+          </div>
+        )}
 
         <div className="flex items-center gap-3">
           <div className="flex-1 h-px bg-border" />
@@ -268,12 +330,15 @@ export const UploadScreen = ({ onBack, onComplete, onGenerateTest }: Props) => {
         <div className="rounded-2xl border border-border bg-card p-1">
           <Textarea
             value={text}
-            onChange={(e) => setText(e.target.value.slice(0, 18000))}
-            placeholder="Paste your lecture notes…"
+            onChange={(e) => setText(e.target.value.slice(0, 100000))}
+            placeholder="Paste your lecture notes or textbook chapters…"
             className="min-h-[140px] border-0 rounded-2xl resize-none focus-visible:ring-0 bg-transparent"
           />
-          <div className="flex justify-end px-3 pb-2">
-            <span className="text-[10px] text-muted-foreground">{text.length}/18000</span>
+          <div className="flex justify-between items-center px-3 pb-2">
+            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+              <Layers className="h-3 w-3" /> Up to 100k characters
+            </span>
+            <span className="text-[10px] text-muted-foreground">{text.length.toLocaleString()}/100,000</span>
           </div>
         </div>
 
