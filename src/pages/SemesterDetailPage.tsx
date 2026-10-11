@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, BookOpen, ChevronRight, Loader2, Plus, Route as RouteIcon, Trash2 } from "lucide-react";
+import { ArrowLeft, BookOpen, ChevronRight, Loader2, Plus, Route as RouteIcon, Trash2, Sparkles, Calendar, Target } from "lucide-react";
 import { StatusBar } from "@/components/studymind/StatusBar";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { haptic } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 import {
-  addCourse, deleteCourse, getSemester, listRoadmapProgress,
+  addCourse, deleteCourse, getSemester, listRoadmapProgress, generateRoadmap,
   type Semester, type SemesterCourse,
 } from "@/lib/semesters";
 import { listNotebooks, type Notebook } from "@/lib/notebooks";
@@ -28,6 +28,7 @@ const SemesterDetailPage = () => {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [buildingAll, setBuildingAll] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<SemesterCourse | null>(null);
 
   const [title, setTitle] = useState("");
@@ -52,6 +53,26 @@ const SemesterDetailPage = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const buildAllRoadmaps = async () => {
+    const ungenerated = courses.filter((c) => (roadmaps[c.id]?.weeks ?? 0) === 0);
+    if (!ungenerated.length) return;
+    setBuildingAll(true);
+    haptic();
+    let doneCount = 0;
+    for (const c of ungenerated) {
+      try {
+        toast.loading(`Building roadmap for ${c.code || c.title}…`, { id: "build-all" });
+        await generateRoadmap(c.id);
+        doneCount++;
+      } catch (e: any) {
+        console.warn(`Failed roadmap for ${c.title}:`, e);
+      }
+    }
+    toast.success(`Generated ${doneCount} roadmap(s)!`, { id: "build-all" });
+    setBuildingAll(false);
+    await refresh();
   };
 
   useEffect(() => { refresh(); }, [semesterId]);
@@ -92,6 +113,10 @@ const SemesterDetailPage = () => {
 
   const totalUnits = courses.reduce((a, c) => a + (c.credit_units ?? 0), 0);
   const planned = courses.filter((c) => (roadmaps[c.id]?.weeks ?? 0) > 0).length;
+  const totalPlannedWeeks = Object.values(roadmaps).reduce((sum, r) => sum + (r.weeks || 0), 0);
+  const totalDoneWeeks = courses.reduce((sum, c) => sum + (c.completed_weeks?.length || 0), 0);
+  const overallPct = totalPlannedWeeks > 0 ? Math.round((totalDoneWeeks / totalPlannedWeeks) * 100) : 0;
+  const ungeneratedCount = courses.length - planned;
 
   if (loading) {
     return <div className="flex items-center justify-center py-24"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>;
@@ -131,6 +156,45 @@ const SemesterDetailPage = () => {
       </div>
 
       <div className="px-5 pt-4">
+        {courses.length > 0 && totalPlannedWeeks > 0 && (
+          <div className="mb-3 rounded-2xl bg-card border border-border p-3.5 animate-fade-in">
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-semibold text-foreground flex items-center gap-1.5">
+                <Target className="h-3.5 w-3.5 text-primary" /> Overall Syllabus Mastery
+              </span>
+              <span className="font-bold text-primary">{overallPct}% ({totalDoneWeeks}/{totalPlannedWeeks} weeks)</span>
+            </div>
+            <div className="h-2 rounded-full bg-secondary overflow-hidden">
+              <div className="h-full gradient-primary transition-all duration-500" style={{ width: `${overallPct}%` }} />
+            </div>
+          </div>
+        )}
+
+        {ungeneratedCount > 0 && courses.length > 0 && (
+          <div className="mb-3 rounded-2xl border border-primary/20 bg-primary-soft/40 p-3.5 flex items-center justify-between gap-3 animate-fade-in">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-primary">Unplanned courses</p>
+              <p className="text-[11px] text-muted-foreground">{ungeneratedCount} course(s) need study roadmaps</p>
+            </div>
+            <Button
+              size="sm"
+              className="h-8 rounded-xl gradient-primary text-xs font-semibold tap-scale shrink-0"
+              onClick={buildAllRoadmaps}
+              disabled={buildingAll}
+            >
+              {buildingAll ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> Generating…
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-3.5 w-3.5 mr-1" /> Build All Roadmaps
+                </>
+              )}
+            </Button>
+          </div>
+        )}
+
         {courses.length === 0 ? (
           <div className="text-center py-12">
             <div className="mx-auto h-14 w-14 rounded-2xl bg-primary-soft text-primary flex items-center justify-center">

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  ArrowLeft, CheckCircle2, Circle, Clock, Lightbulb, ListChecks, Loader2, RefreshCw, Sparkles,
+  ArrowLeft, CheckCircle2, Circle, Clock, Lightbulb, ListChecks, Loader2, RefreshCw, Sparkles, Share2, Zap
 } from "lucide-react";
 import { StatusBar } from "@/components/studymind/StatusBar";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,8 @@ import {
 import { toast } from "sonner";
 import { haptic } from "@/lib/haptics";
 import {
-  generateRoadmap, getCourse, getRoadmap, updateCourse,
-  type CourseRoadmap, type SemesterCourse,
+  generateRoadmap, getCourse, getRoadmap, updateCourse, createWeekPracticeQuiz,
+  type CourseRoadmap, type SemesterCourse, type RoadmapWeek
 } from "@/lib/semesters";
 
 const CourseRoadmapPage = () => {
@@ -22,6 +22,7 @@ const CourseRoadmapPage = () => {
   const [roadmap, setRoadmap] = useState<CourseRoadmap | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [quizzingWeek, setQuizzingWeek] = useState<number | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -51,6 +52,37 @@ const CourseRoadmapPage = () => {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const startWeekQuiz = async (w: RoadmapWeek) => {
+    if (!course) return;
+    setQuizzingWeek(w.week);
+    haptic();
+    try {
+      toast.loading(`Creating practice quiz for Week ${w.week}…`, { id: "week-quiz" });
+      const res = await createWeekPracticeQuiz(course, w, 5);
+      toast.success(`Week ${w.week} quiz ready!`, { id: "week-quiz" });
+      navigate(`/practice/${res.studyPackId}`);
+    } catch (e: any) {
+      toast.error(e?.message ?? "Couldn't generate practice quiz", { id: "week-quiz" });
+    } finally {
+      setQuizzingWeek(null);
+    }
+  };
+
+  const shareRoadmap = () => {
+    if (!course || !roadmap) return;
+    const lines = [
+      `📚 Course Syllabus: ${course.title} (${course.code || ""})`,
+      `Unit Load: ${course.credit_units} units · ${roadmap.weeks.length} Weeks Roadmap`,
+      "",
+      ...roadmap.weeks.map((w) => `• Week ${w.week}: ${w.title}\n  Focus: ${w.focus || ""}\n  Topics: ${(w.topics || []).join(", ")}`),
+      "",
+      "Created with StudyMind AI! 🚀",
+    ].join("\n");
+    navigator.clipboard.writeText(lines);
+    haptic("success" as any);
+    toast.success("Roadmap copied to clipboard!");
   };
 
   const toggleWeek = async (week: number) => {
@@ -86,12 +118,20 @@ const CourseRoadmapPage = () => {
           <button onClick={() => navigate(`/semester/${course.semester_id}`)} className="h-9 w-9 rounded-full bg-white/15 flex items-center justify-center backdrop-blur tap-scale">
             <ArrowLeft className="h-4 w-4 text-white" />
           </button>
-          {roadmap && (
-            <button onClick={generate} disabled={generating}
-              className="h-9 px-3 rounded-full bg-white/15 backdrop-blur text-xs font-bold inline-flex items-center gap-1 tap-scale disabled:opacity-60">
-              {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Regenerate
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {roadmap && (
+              <>
+                <button onClick={shareRoadmap}
+                  className="h-9 px-3 rounded-full bg-white/15 backdrop-blur text-xs font-bold inline-flex items-center gap-1 tap-scale">
+                  <Share2 className="h-3.5 w-3.5" /> Share
+                </button>
+                <button onClick={generate} disabled={generating}
+                  className="h-9 px-3 rounded-full bg-white/15 backdrop-blur text-xs font-bold inline-flex items-center gap-1 tap-scale disabled:opacity-60">
+                  {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Regenerate
+                </button>
+              </>
+            )}
+          </div>
         </div>
         <h1 className="font-bold text-xl break-words">{course.title}</h1>
         <p className="text-white/85 text-xs mt-1">
@@ -194,6 +234,31 @@ const CourseRoadmapPage = () => {
                             </ul>
                           </div>
                         ) : null}
+
+                        <div className="mt-4 pt-3 border-t border-border flex items-center justify-between gap-2">
+                          <Button
+                            size="sm"
+                            className="h-8 rounded-xl gradient-primary text-xs font-semibold tap-scale inline-flex items-center gap-1.5"
+                            onClick={() => startWeekQuiz(w)}
+                            disabled={quizzingWeek === w.week}
+                          >
+                            {quizzingWeek === w.week ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Preparing quiz…
+                              </>
+                            ) : (
+                              <>
+                                <Zap className="h-3.5 w-3.5" /> Practice Week {w.week} Quiz
+                              </>
+                            )}
+                          </Button>
+                          <button
+                            onClick={() => toggleWeek(w.week)}
+                            className="text-[11px] text-muted-foreground hover:text-foreground font-medium tap-scale"
+                          >
+                            {isDone ? "Mark incomplete" : "Mark complete ✓"}
+                          </button>
+                        </div>
                       </AccordionContent>
                     </AccordionItem>
                   );

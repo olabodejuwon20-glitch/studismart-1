@@ -161,12 +161,175 @@ export async function getRoadmap(courseId: string): Promise<CourseRoadmap | null
 }
 
 export async function generateRoadmap(courseId: string): Promise<CourseRoadmap> {
-  const { data, error } = await supabase.functions.invoke("generate-course-roadmap", {
-    body: { course_id: courseId },
-  });
-  if (error) throw new Error(error.message ?? "Couldn't generate roadmap");
-  if ((data as any)?.error) throw new Error((data as any).error);
-  return (data as any).roadmap as CourseRoadmap;
+  try {
+    const { data, error } = await supabase.functions.invoke("generate-course-roadmap", {
+      body: { course_id: courseId },
+    });
+    if (!error && (data as any)?.roadmap) {
+      return (data as any).roadmap as CourseRoadmap;
+    }
+    if ((data as any)?.error) throw new Error((data as any).error);
+    if (error) throw error;
+    return (data as any).roadmap as CourseRoadmap;
+  } catch (err: any) {
+    const geminiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
+    if (geminiKey) {
+      return await generateRoadmapClient(courseId, geminiKey);
+    }
+    throw new Error(err?.message ?? "Couldn't generate roadmap");
+  }
+}
+
+/** Client-side Gemini fallback for roadmap generation */
+export async function generateRoadmapClient(courseId: string, apiKey: string): Promise<CourseRoadmap> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not signed in");
+
+  const course = await getCourse(courseId);
+  if (!course) throw new Error("Course not found");
+
+  const semester = await getSemester(course.semester_id);
+  const weeks = Math.min(Math.max(semester?.weeks ?? 12, 4), 20);
+
+  const sys = `You are a university academic coordinator designing a week-by-week study roadmap for a student.
+Plan exactly ${weeks} weeks. Be structured, rigorous, and progressive:
+- Weeks 1 to 3: Core foundations and key principles.
+- Middle Weeks: Deep dive into core modules and practical assignments.
+- Final 2 Weeks: Mock revisions, exam strategies, and past questions.
+
+Respond strictly as JSON matching:
+{
+  "overview": string (150-250 words, scope and strategy),
+  "prerequisites": [string],
+  "weeks": [{
+     "week": number,
+     "title": string,
+     "focus": string,
+     "topics": [string],
+     "activities": [string],
+     "est_minutes": number
+  }],
+  "exam_tips": [string]
+}`;
+
+  const prompt = `Course: ${course.title}${course.code ? ` (${course.code})` : ""}
+Credit units: ${course.credit_units}
+Semester: ${semester?.title ?? "Academic Semester"}${semester?.level ? ` · ${semester.level}` : ""}`;
+
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: sys }] },
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
+    }
+  );
+
+  if (!resp.ok) throw new Error(`Gemini roadmap failed: ${resp.status}`);
+  const data = await resp.json();
+  const rawJson = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawJson) throw new Error("No response from Gemini");
+
+  const parsed = JSON.parse(rawJson);
+  const row = {
+    user_id: user.id,
+    course_id: course.id,
+    overview: typeof parsed.overview === "string" ? parsed.overview : "",
+    prerequisites: Array.isArray(parsed.prerequisites) ? parsed.prerequisites : [],
+    weeks: Array.isArray(parsed.weeks) ? parsed.weeks : [],
+    exam_tips: Array.isArray(parsed.exam_tips) ? parsed.exam_tips : [],
+    generated_at: new Date().toISOString(),
+  };
+
+  const { data: saved, error } = await supabase
+    .from("course_roadmaps")
+    .upsert(row, { onConflict: "course_id" })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return saved as unknown as CourseRoadmap;
+}
+
+/**
+ * Creates an instant targeted practice quiz for a specific roadmap week
+ */
+export async function createWeekPracticeQuiz(
+  course: SemesterCourse,
+  week: RoadmapWeek,
+  numQuestions: number = 5
+): Promise<{ studyPackId: string; title: string }> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not signed in");
+
+  const quizTitle = `${course.code ? course.code + " " : ""}${course.title} · Week ${week.week} Quiz`;
+  const topicsSummary = (week.topics ?? []).join(", ");
+  const rawContext = `Course: ${course.title} (${course.code || ""})\nWeek ${week.week}: ${week.title}\nFocus: ${week.focus || ""}\nTopics: ${topicsSummary}\nKey Study Tasks: ${(week.activities || []).join("; ")}`;
+
+  const { data: material, error: matErr } = await supabase
+    .from("materials")
+    .insert({
+      user_id: user.id,
+      title: quizTitle,
+      source_type: "text",
+      raw_text: rawContext,
+      status: "pending",
+    })
+    .select()
+    .single();
+
+  if (matErr || !material) throw matErr ?? new Error("Couldn't create practice material");
+
+  let packId: string | null = null;
+  try {
+    const { data } = await supabase.functions.invoke("generate-study-pack", {
+      body: { material_id: material.id, num_questions: numQuestions },
+    });
+    packId = (data as any)?.study_pack_id;
+  } catch {
+    // Client fallback if edge function errors
+    const { generateStudyPackClient } = await import("@/lib/clientAiGenerator");
+    const geminiKey = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
+    if (geminiKey) {
+      const clientData = await generateStudyPackClient(rawContext, quizTitle, {
+        numQuestions,
+        apiKey: geminiKey,
+      });
+      const { data: pack } = await supabase
+        .from("study_packs")
+        .insert({
+          material_id: material.id,
+          user_id: user.id,
+          summary: clientData.summary,
+          topics: clientData.topics,
+        })
+        .select()
+        .single();
+
+      if (pack && clientData.questions.length) {
+        await supabase.from("questions").insert(
+          clientData.questions.map((q) => ({
+            study_pack_id: pack.id,
+            user_id: user.id,
+            topic: q.topic,
+            question: q.question,
+            options: q.options,
+            correct_index: q.correct_index,
+            explanation: q.explanation,
+            difficulty: q.difficulty,
+          }))
+        );
+        packId = pack.id;
+      }
+    }
+  }
+
+  if (!packId) throw new Error("Could not generate week practice quiz. Please check AI connection.");
+  return { studyPackId: packId, title: quizTitle };
 }
 
 export async function listRoadmapProgress(semesterId: string) {
