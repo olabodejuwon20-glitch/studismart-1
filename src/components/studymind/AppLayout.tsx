@@ -76,12 +76,24 @@ export const AppLayout = () => {
   const padded = !hideNav;
 
   const handleRefresh = async () => {
-    // Refresh wallet/coins globally, then notify all screens to re-fetch.
+    // 1. Force-update Service Worker so new code / assets are pulled from server/Vercel
+    if ("serviceWorker" in navigator) {
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((r) => r.update()));
+      } catch (err) {
+        console.warn("SW update error:", err);
+      }
+    }
+
+    // 2. Dispatch in-app events
     try { await ensureWallet(); } catch {}
     window.dispatchEvent(new CustomEvent("wallet-updated"));
     window.dispatchEvent(new CustomEvent("app-refresh"));
-    // Give screens a moment to re-fetch in parallel.
-    await new Promise((r) => setTimeout(r, 600));
+
+    // 3. Briefly display refreshing indicator then trigger a true reload
+    await new Promise((r) => setTimeout(r, 450));
+    window.location.reload();
   };
 
   return (
@@ -92,7 +104,14 @@ export const AppLayout = () => {
           <Outlet />
         </div>
       ) : (
-        <PullToRefresh onRefresh={handleRefresh} disabled={location.pathname.startsWith("/tutor/")}>
+        <PullToRefresh
+          onRefresh={handleRefresh}
+          disabled={
+            location.pathname.startsWith("/tutor/") ||
+            location.pathname.includes("/practice/") ||
+            location.pathname.startsWith("/exam-focus")
+          }
+        >
           <div key={location.pathname} className="page-transition">
             <Outlet />
           </div>

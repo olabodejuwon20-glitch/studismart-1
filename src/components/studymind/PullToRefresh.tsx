@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useRef, useState, useCallback } from "react";
 import { Loader2, ArrowDown, Check } from "lucide-react";
 import { toast } from "sonner";
+import { haptic } from "@/lib/haptics";
 
 interface Props {
   onRefresh: () => Promise<void> | void;
@@ -8,34 +9,34 @@ interface Props {
   threshold?: number;
   disabled?: boolean;
   silent?: boolean;
-  /** Auto-refresh when the tab regains visibility after this many ms of inactivity. */
-  autoRefreshMs?: number;
   className?: string;
 }
 
 /**
- * Native-feeling pull-to-refresh that works with document scroll.
- * - Activates only when window.scrollY === 0.
- * - Prevents duplicate refreshes via a ref guard.
- * - Auto-refreshes on tab visibility/focus after `autoRefreshMs`.
+ * Native-feeling pull-to-refresh that works smoothly across touch and desktop.
+ * - Elastic bounce that physically pulls down the page content.
+ * - Haptic feedback when the pull crosses the threshold.
+ * - Distinct release-to-refresh indicator.
+ * - Triggers an actual app refresh / reload.
  */
 export const PullToRefresh = ({
   onRefresh,
   children,
-  threshold = 70,
+  threshold = 68,
   disabled = false,
   silent = false,
-  autoRefreshMs = 60_000,
   className = "",
 }: Props) => {
   const startY = useRef<number | null>(null);
-  const pullingRef = useRef(false);
+  const startX = useRef<number | null>(null);
+  const isDragging = useRef(false);
   const refreshingRef = useRef(false);
-  const lastRefreshAt = useRef<number>(Date.now());
+  const readyRef = useRef(false);
 
   const [pullDistance, setPullDistance] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
 
   const triggerRefresh = useCallback(async () => {
     if (refreshingRef.current) return;
@@ -43,122 +44,242 @@ export const PullToRefresh = ({
     setRefreshing(true);
     try {
       await onRefresh();
-      lastRefreshAt.current = Date.now();
       setSuccess(true);
-      if (!silent) toast.success("Updated", { duration: 1100 });
-      setTimeout(() => setSuccess(false), 900);
+      if (!silent) toast.success("App refreshed", { duration: 1000 });
+      setTimeout(() => setSuccess(false), 800);
     } catch (e: any) {
       toast.error(e?.message ?? "Refresh failed");
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
       setPullDistance(0);
+      readyRef.current = false;
+      setIsPulling(false);
     }
   }, [onRefresh, silent]);
 
-  // Auto-refresh on visibility/focus after inactivity.
-  useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastRefreshAt.current < autoRefreshMs) return;
-      triggerRefresh();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("focus", onVis);
-    return () => {
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("focus", onVis);
-    };
-  }, [triggerRefresh, autoRefreshMs]);
-
-  // Touch handlers attached to window so they catch pulls anywhere on screen.
   useEffect(() => {
     if (disabled) return;
+
+    const getScrollTop = () => {
+      return (
+        window.scrollY ||
+        document.documentElement.scrollTop ||
+        document.body.scrollTop ||
+        0
+      );
+    };
+
     const findScrollableAncestor = (node: EventTarget | null): HTMLElement | null => {
       let el = node as HTMLElement | null;
       while (el && el !== document.body && el !== document.documentElement) {
         const s = getComputedStyle(el);
         const oy = s.overflowY;
-        if ((oy === "auto" || oy === "scroll" || oy === "overlay") && el.scrollHeight > el.clientHeight) {
+        if (
+          (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+          el.scrollHeight > el.clientHeight
+        ) {
           return el;
         }
         el = el.parentElement;
       }
       return null;
     };
-    const onStart = (e: TouchEvent) => {
+
+    const handleStart = (clientX: number, clientY: number, target: EventTarget | null) => {
       if (refreshingRef.current) return;
-      if (window.scrollY > 0) return;
-      // If the touch is inside an inner scroll container that's not at the top,
-      // let it scroll normally — don't hijack as pull-to-refresh.
-      const inner = findScrollableAncestor(e.target);
-      if (inner && inner.scrollTop > 0) return;
-      startY.current = e.touches[0].clientY;
-      pullingRef.current = true;
+      if (getScrollTop() > 2) return;
+
+      const htmlTarget = target as HTMLElement | null;
+      if (htmlTarget) {
+        const tag = htmlTarget.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select" || htmlTarget.isContentEditable) {
+          return;
+        }
+      }
+
+      const inner = findScrollableAncestor(target);
+      if (inner && inner.scrollTop > 2) return;
+
+      startY.current = clientY;
+      startX.current = clientX;
+      isDragging.current = true;
+      readyRef.current = false;
     };
-    const onMove = (e: TouchEvent) => {
-      if (!pullingRef.current || startY.current == null) return;
-      const dy = e.touches[0].clientY - startY.current;
+
+    const handleMove = (clientX: number, clientY: number, e: TouchEvent | MouseEvent) => {
+      if (!isDragging.current || startY.current == null || startX.current == null) return;
+      if (refreshingRef.current) return;
+
+      const dy = clientY - startY.current;
+      const dx = clientX - startX.current;
+
       if (dy <= 0) {
         if (pullDistance !== 0) setPullDistance(0);
+        setIsPulling(false);
         return;
       }
-      // Prevent rubber-banding interference once we own the gesture.
-      if (dy > 8 && e.cancelable) e.preventDefault();
-      const eased = Math.min(120, Math.pow(dy, 0.85));
-      setPullDistance(eased);
+
+      // If user is clearly swiping horizontally, cancel vertical pull
+      if (Math.abs(dx) > Math.abs(dy) && dy < 16) {
+        isDragging.current = false;
+        setIsPulling(false);
+        setPullDistance(0);
+        return;
+      }
+
+      if (getScrollTop() > 2) {
+        isDragging.current = false;
+        setIsPulling(false);
+        setPullDistance(0);
+        return;
+      }
+
+      if (dy > 6 && e.cancelable) {
+        e.preventDefault();
+      }
+
+      setIsPulling(true);
+
+      // Elastic dampening curve
+      const dampened = Math.min(105, Math.pow(dy, 0.82) * 1.55);
+      setPullDistance(dampened);
+
+      const isReady = dampened >= threshold;
+      if (isReady && !readyRef.current) {
+        readyRef.current = true;
+        haptic("light");
+      } else if (!isReady && readyRef.current) {
+        readyRef.current = false;
+      }
     };
-    const onEnd = () => {
-      if (!pullingRef.current) return;
-      pullingRef.current = false;
+
+    const handleEnd = () => {
+      if (!isDragging.current) return;
+      isDragging.current = false;
       startY.current = null;
-      setPullDistance((d) => {
-        if (d >= threshold) triggerRefresh();
-        return d >= threshold ? d : 0;
-      });
+      startX.current = null;
+
+      if (pullDistance >= threshold && !refreshingRef.current) {
+        haptic("medium");
+        triggerRefresh();
+      } else {
+        setIsPulling(false);
+        setPullDistance(0);
+        readyRef.current = false;
+      }
     };
-    window.addEventListener("touchstart", onStart, { passive: true });
-    window.addEventListener("touchmove", onMove, { passive: false });
-    window.addEventListener("touchend", onEnd);
-    window.addEventListener("touchcancel", onEnd);
+
+    // Touch event listeners
+    const onTouchStart = (e: TouchEvent) => {
+      handleStart(e.touches[0].clientX, e.touches[0].clientY, e.target);
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      handleMove(e.touches[0].clientX, e.touches[0].clientY, e);
+    };
+    const onTouchEnd = () => handleEnd();
+
+    // Mouse event listeners for desktop testing (dragging down from top edge)
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return; // Left click only
+      if (e.clientY <= 65 && getScrollTop() <= 0) {
+        handleStart(e.clientX, e.clientY, e.target);
+      }
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (isDragging.current) {
+        handleMove(e.clientX, e.clientY, e);
+      }
+    };
+    const onMouseUp = () => {
+      if (isDragging.current) handleEnd();
+    };
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd);
+    window.addEventListener("touchcancel", onTouchEnd);
+
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+
     return () => {
-      window.removeEventListener("touchstart", onStart);
-      window.removeEventListener("touchmove", onMove);
-      window.removeEventListener("touchend", onEnd);
-      window.removeEventListener("touchcancel", onEnd);
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
     };
   }, [disabled, threshold, triggerRefresh, pullDistance]);
 
-  const indicatorOpacity = Math.min(1, pullDistance / threshold);
-  const ready = pullDistance >= threshold;
-  const indicatorTop = refreshing ? 24 : Math.max(0, pullDistance - 30);
+  const ready = readyRef.current || pullDistance >= threshold;
+  const contentTranslateY = refreshing
+    ? 52
+    : isPulling
+    ? Math.min(75, pullDistance * 0.65)
+    : 0;
 
   return (
     <div className={`relative ${className}`}>
+      {/* Floating pull indicator pill */}
       <div
-        className="pointer-events-none fixed left-0 right-0 z-50 flex justify-center"
+        className="pointer-events-none fixed left-0 right-0 z-50 flex items-center justify-center"
         style={{
-          top: `calc(env(safe-area-inset-top) + ${indicatorTop}px)`,
-          opacity: refreshing ? 1 : indicatorOpacity,
-          transition: pullingRef.current ? "none" : "opacity 200ms ease, top 250ms ease",
+          top: `calc(env(safe-area-inset-top, 0px) + ${
+            refreshing ? 18 : Math.max(10, pullDistance * 0.5 - 20)
+          }px)`,
+          opacity: refreshing ? 1 : Math.min(1, pullDistance / (threshold * 0.7)),
+          transform: `scale(${
+            refreshing ? 1 : Math.min(1, 0.6 + (pullDistance / threshold) * 0.4)
+          })`,
+          transition: isPulling
+            ? "none"
+            : "top 260ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 200ms ease, transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1)",
         }}
       >
-        <div className="h-9 w-9 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center">
-          {success ? (
-            <Check className="h-4 w-4 text-emerald-600" />
-          ) : refreshing ? (
-            <Loader2 className="h-4 w-4 text-violet-600 animate-spin" />
+        <div className="flex items-center gap-2 rounded-full bg-card/95 backdrop-blur-md px-3.5 py-1.5 shadow-lg border border-border text-xs font-medium text-foreground">
+          {refreshing ? (
+            <>
+              <Loader2 className="h-4 w-4 text-primary animate-spin" />
+              <span>Refreshing app...</span>
+            </>
+          ) : success ? (
+            <>
+              <Check className="h-4 w-4 text-emerald-500" />
+              <span>Updated!</span>
+            </>
           ) : (
-            <ArrowDown
-              className={`h-4 w-4 transition-transform duration-200 ${
-                ready ? "rotate-180 text-violet-600" : "text-slate-400"
-              }`}
-            />
+            <>
+              <ArrowDown
+                className={`h-4 w-4 transition-transform duration-200 ${
+                  ready ? "rotate-180 text-primary" : "text-muted-foreground"
+                }`}
+              />
+              <span className={ready ? "text-primary font-semibold" : "text-muted-foreground"}>
+                {ready ? "Release to refresh" : "Pull to refresh"}
+              </span>
+            </>
           )}
         </div>
       </div>
 
-      {children}
+      {/* Elastic content container */}
+      <div
+        style={{
+          transform: `translate3d(0, ${contentTranslateY}px, 0)`,
+          transition: isPulling
+            ? "none"
+            : "transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+          willChange: isPulling || refreshing ? "transform" : "auto",
+        }}
+      >
+        {children}
+      </div>
     </div>
   );
 };
+
