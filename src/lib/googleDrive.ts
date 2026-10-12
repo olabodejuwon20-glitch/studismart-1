@@ -10,12 +10,13 @@ export interface DriveConfig {
 
 const STORAGE_KEY_CLIENT_ID = "studismart_google_client_id";
 const STORAGE_KEY_API_KEY = "studismart_google_api_key";
+export const DEFAULT_GOOGLE_CLIENT_ID = "481450930056-3np0akqtaavg7n5uro8kp4mpurmubiuf.apps.googleusercontent.com";
 
 export function getStoredDriveConfig(): DriveConfig {
   const clientId =
     (import.meta.env.VITE_GOOGLE_CLIENT_ID as string) ||
     localStorage.getItem(STORAGE_KEY_CLIENT_ID) ||
-    "";
+    DEFAULT_GOOGLE_CLIENT_ID;
   const apiKey =
     (import.meta.env.VITE_GOOGLE_API_KEY as string) ||
     localStorage.getItem(STORAGE_KEY_API_KEY) ||
